@@ -156,9 +156,15 @@ textarea,
   opacity: 0;
   pointer-events: auto;
   animation: doll-arrives 1s 2.8s ease-out forwards;
-  transition: top 420ms ease-out, left 420ms ease-out;
+  transition: top 600ms cubic-bezier(0.34, 1.56, 0.64, 1), left 600ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
+/* Math: 1.25rem (button bottom) + 7rem (doll height) = 8.25rem from bottom */
+.doll-follow-button {
+  top: calc(100vh - 9rem) !important;
+  /* Math: 1.25rem (button right) + 4.5rem (button width) + 1rem (gap) + 7rem (doll width) = 13.75rem from right */
+  left: calc(100vw - 19rem) !important;
+}
 .doll-image {
   display: block;
   width: 100%;
@@ -205,8 +211,15 @@ textarea,
   box-shadow: 5px 6px 0 rgba(0, 0, 0, 0.36);
   font-family: "IM FELL English", Georgia, serif;
   pointer-events: auto;
+  transition: top 600ms cubic-bezier(0.34, 1.56, 0.64, 1), left 600ms cubic-bezier(0.34, 1.56, 0.64, 1), right 600ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
+/* Anchors the text bubble cleanly above and to the left of the doll */
+.doll-bubble-follow {
+  top: calc(100vh - 14rem) !important;
+  left: auto !important;
+  right: 1.5rem !important;
+}
 .doll-bubble-right {
   left: 7rem;
 }

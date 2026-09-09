@@ -76,7 +76,10 @@ export default function DollCompanion({
       if (dist > 4) suppressClick.current = true;
       if (!suppressClick.current) return;
       setManualPosition({
-        left: Math.min(88, Math.max(2, (e.clientX / window.innerWidth) * 100 - 4)),
+        left: Math.min(
+          88,
+          Math.max(2, (e.clientX / window.innerWidth) * 100 - 4),
+        ),
         y: Math.min(94, Math.max(8, (e.clientY / window.innerHeight) * 100)),
       });
     },
@@ -99,11 +102,11 @@ export default function DollCompanion({
   };
 
   const displayedLeft = manualPosition?.left ?? 4;
-  const displayedY = followButton ? 78 : (manualPosition?.y ?? position.y);
+  const displayedY = manualPosition?.y ?? position.y;
 
   return (
     <div
-      className="doll-companion"
+      className={`doll-companion ${followButton ? "doll-follow-button" : ""}`}
       style={
         {
           "--doll-left": `${displayedLeft}vw`,
@@ -121,12 +124,18 @@ export default function DollCompanion({
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
-        <Image src="/doll.png" alt="" className="doll-image" width={112} height={112} />
+        <Image
+          src="/doll.png"
+          alt=""
+          className="doll-image"
+          width={112}
+          height={112}
+        />
       </button>
 
       {bubbleOpen && (
         <div
-          className={`doll-bubble ${displayedLeft < 50 ? "doll-bubble-right" : "doll-bubble-left"}`}
+          className={`doll-bubble ${displayedLeft < 50 ? "doll-bubble-right" : "doll-bubble-left"} ${followButton ? "doll-bubble-follow" : ""}`}
           role="dialog"
           aria-label="Milkshake offer"
         >
@@ -141,7 +150,11 @@ export default function DollCompanion({
             </button>
           )}
 
-          <p key={messageStep} className="doll-message-typewriter" aria-label={DOLL_MESSAGES[messageStep]}>
+          <p
+            key={messageStep}
+            className="doll-message-typewriter"
+            aria-label={DOLL_MESSAGES[messageStep]}
+          >
             {Array.from(DOLL_MESSAGES[messageStep]).map((char, i) => (
               <span
                 key={`${messageStep}-${i}`}

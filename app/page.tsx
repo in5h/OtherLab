@@ -23,7 +23,7 @@ export default function Home() {
   // Auto-close bubble (timer is an external system, so this is valid)
   useEffect(() => {
     if (!dollBubbleOpen) return;
-    const timer = setTimeout(() => setDollBubbleOpen(false), 5000);
+    const timer = setTimeout(() => setDollBubbleOpen(false), 50000);
     return () => clearTimeout(timer);
   }, [dollBubbleOpen, dollMessageStep]);
 
