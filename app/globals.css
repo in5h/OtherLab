@@ -23,6 +23,31 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), sans-serif;
+  cursor: url("/cursor.png") 16 16, auto;
+}
+
+a,
+button,
+[role="button"],
+input[type="submit"],
+summary,
+.doll-trigger,
+.doll-choice,
+.floating-cta-button,
+.milkshake-drop,
+.coraline-link {
+  cursor: url("/cursor.png") 16 16, pointer;
+}
+
+input,
+textarea,
+[contenteditable] {
+  cursor: url("/cursor.png") 16 16, text;
+}
+
+.doll-trigger-dragging,
+.milkshake-dragging {
+  cursor: url("/cursor.png") 16 16, grabbing;
 }
 
 ::selection {
@@ -137,6 +162,7 @@ body {
 .doll-image {
   display: block;
   width: 100%;
+  height: auto;
   filter: drop-shadow(5px 7px 0 rgba(0, 0, 0, 0.42));
   transform: rotate(-4deg);
   transition: transform 180ms ease;
