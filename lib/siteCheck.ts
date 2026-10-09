@@ -32,6 +32,9 @@ const MAX_HTML_BYTES = 3 * 1024 * 1024;
 const MAX_LINKS_TO_CHECK = 20;
 const LINK_CONCURRENCY = 5;
 
+/** Statuses that usually mean "this server blocks automated requests", not "this page is gone". */
+const BOT_BLOCK_STATUSES = new Set([401, 403, 429, 999]);
+
 /** Accepts "example.com", "https://example.com/path", etc. Returns a normalized http(s) URL. */
 export function normalizeUrl(input: string): URL {
   const trimmed = input.trim();
@@ -128,6 +131,8 @@ interface FetchOutcome {
   response: Response;
   finalUrl: URL;
   redirects: number;
+  /** Time spent waiting on the website itself (all hops, up to response headers). */
+  elapsedMs: number;
 }
 
 /** fetch() that follows redirects manually so every hop passes the public-host check. */
@@ -136,18 +141,22 @@ async function safeFetch(
   method: "GET" | "HEAD",
   timeoutMs: number,
 ): Promise<FetchOutcome> {
+  const signal = AbortSignal.timeout(timeoutMs);
   let current = start;
+  let elapsedMs = 0;
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
     await assertPublicHost(current);
+    const hopStarted = performance.now();
     const response = await fetch(current, {
       method,
       redirect: "manual",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal,
       headers: {
         "user-agent": USER_AGENT,
         accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
       },
     });
+    elapsedMs += performance.now() - hopStarted;
     const location = response.headers.get("location");
     if (response.status >= 300 && response.status < 400 && location) {
       await response.body?.cancel();
@@ -157,13 +166,27 @@ async function safeFetch(
       }
       continue;
     }
-    return { response, finalUrl: current, redirects };
+    return { response, finalUrl: current, redirects, elapsedMs: Math.round(elapsedMs) };
   }
   throw new SiteCheckError("The website redirected too many times.");
 }
 
-async function readLimitedText(response: Response): Promise<{ text: string; bytes: number }> {
-  if (!response.body) return { text: "", bytes: 0 };
+function decodeHtml(bytes: Buffer, contentType: string): string {
+  const declared =
+    contentType.match(/charset=["']?([\w-]+)/i)?.[1] ??
+    bytes.subarray(0, 2048).toString("latin1").match(/<meta[^>]+charset=["']?([\w-]+)/i)?.[1];
+  if (declared) {
+    try {
+      return new TextDecoder(declared).decode(bytes);
+    } catch {
+      // Unknown charset label: fall back to UTF-8 below.
+    }
+  }
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+async function readLimitedBody(response: Response): Promise<Buffer> {
+  if (!response.body) return Buffer.alloc(0);
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let bytes = 0;
@@ -177,23 +200,40 @@ async function readLimitedText(response: Response): Promise<{ text: string; byte
     }
     chunks.push(value);
   }
-  return { text: Buffer.concat(chunks).toString("utf8"), bytes };
+  return Buffer.concat(chunks);
+}
+
+function errorCode(error: unknown): string | undefined {
+  return (error as { cause?: { code?: string } })?.cause?.code;
+}
+
+function isTimeout(error: unknown): boolean {
+  return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 }
 
 function describeFetchError(error: unknown): string {
   if (error instanceof SiteCheckError) return error.message;
-  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
-    return "The website took longer than 10 seconds to respond.";
-  }
-  const cause = (error as { cause?: { code?: string } })?.cause?.code;
-  if (cause === "ENOTFOUND" || cause === "EAI_AGAIN") {
+  if (isTimeout(error)) return "The website took longer than 10 seconds to respond.";
+  const code = errorCode(error);
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
     return "Could not find that website. Check the spelling of the address.";
   }
-  if (cause === "ECONNREFUSED") return "The website refused the connection.";
-  if (cause?.startsWith("CERT_") || cause?.includes("SSL") || cause?.includes("TLS")) {
+  if (code === "ECONNREFUSED") return "The website refused the connection.";
+  if (code === "ECONNRESET") return "The website closed the connection unexpectedly.";
+  if (code?.startsWith("CERT_") || code?.includes("SSL") || code?.includes("TLS") || code?.includes("CERT")) {
     return "The website's security certificate could not be verified.";
   }
   return "The website could not be reached.";
+}
+
+function describeHttpError(status: number, statusText: string): string {
+  if (BOT_BLOCK_STATUSES.has(status) || status === 503) {
+    return `The website answered with HTTP ${status} and appears to block automated checks, so the page could not be analysed.`;
+  }
+  if (status === 404 || status === 410) {
+    return `That page does not exist (HTTP ${status}). Check the address.`;
+  }
+  return `The website answered with HTTP ${status}${statusText ? ` ${statusText}` : ""}, so the page could not be checked.`;
 }
 
 function formatBytes(bytes: number): string {
@@ -206,6 +246,13 @@ function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
+export interface PageAnalysis {
+  checks: CheckResult[];
+  links: URL[];
+  /** True when the page declares an icon with <link rel="icon">; otherwise /favicon.ico should be probed. */
+  declaresIcon: boolean;
+}
+
 /** Pure HTML/header analysis, separated from networking so it can be tested with fixtures. */
 export function analyzePage(input: {
   html: string;
@@ -213,11 +260,22 @@ export function analyzePage(input: {
   headers: Headers;
   responseTimeMs: number;
   htmlBytes: number;
-}): { checks: CheckResult[]; links: URL[] } {
+}): PageAnalysis {
   const { html, finalUrl, headers, responseTimeMs, htmlBytes } = input;
   const $ = cheerio.load(html);
   const checks: CheckResult[] = [];
   const isHttps = finalUrl.protocol === "https:";
+
+  // Relative links and resources resolve against <base href> when present.
+  let baseUrl = finalUrl;
+  const baseHref = $("base[href]").first().attr("href");
+  if (baseHref) {
+    try {
+      baseUrl = new URL(baseHref, finalUrl);
+    } catch {
+      // Ignore an invalid <base>; browsers do the same.
+    }
+  }
 
   checks.push(
     isHttps
@@ -241,11 +299,17 @@ export function analyzePage(input: {
     status: htmlBytes <= 500 * 1024 ? "pass" : htmlBytes <= 1500 * 1024 ? "warn" : "fail",
     detail:
       htmlBytes <= 500 * 1024
-        ? `The HTML is ${formatBytes(htmlBytes)}.`
-        : `The HTML is ${formatBytes(htmlBytes)}, which is heavy and slows down first load.`,
+        ? `The HTML is ${formatBytes(htmlBytes)} (uncompressed).`
+        : `The HTML is ${formatBytes(htmlBytes)} (uncompressed), which is heavy and slows down first load.`,
   });
 
-  const title = $("head > title").first().text().trim() || $("title").first().text().trim();
+  // Ignore <title> elements inside inline SVGs; only the document title matters.
+  const title = $("title")
+    .filter((_, el) => $(el).closest("svg").length === 0)
+    .first()
+    .text()
+    .replace(/\s+/g, " ")
+    .trim();
   checks.push(
     !title
       ? { id: "title", label: "Page title", status: "fail", detail: "The page has no <title>. It is shown in browser tabs and search results." }
@@ -254,7 +318,7 @@ export function analyzePage(input: {
         : { id: "title", label: "Page title", status: "pass", detail: `"${title}"` },
   );
 
-  const description = $('meta[name="description" i]').attr("content")?.trim() ?? "";
+  const description = ($('meta[name="description" i]').first().attr("content") ?? "").replace(/\s+/g, " ").trim();
   checks.push(
     !description
       ? { id: "description", label: "Meta description", status: "warn", detail: "No meta description. Search engines will guess a summary from the page text." }
@@ -263,7 +327,7 @@ export function analyzePage(input: {
         : { id: "description", label: "Meta description", status: "pass", detail: `${description.length} characters.` },
   );
 
-  const viewport = $('meta[name="viewport" i]').attr("content") ?? "";
+  const viewport = $('meta[name="viewport" i]').first().attr("content") ?? "";
   checks.push(
     /width\s*=\s*device-width/i.test(viewport)
       ? { id: "viewport", label: "Mobile friendly viewport", status: "pass", detail: "The page tells phones to use the device width." }
@@ -277,34 +341,53 @@ export function analyzePage(input: {
       : { id: "lang", label: "Page language", status: "warn", detail: "The <html> tag has no lang attribute, which screen readers rely on." },
   );
 
-  const h1Count = $("h1").length;
+  const h1s = $("h1");
+  const h1Text = (h1s.first().text().replace(/\s+/g, " ").trim() || h1s.first().find("img[alt]").attr("alt")?.trim() || "").slice(0, 80);
   checks.push(
-    h1Count === 1
-      ? { id: "h1", label: "Main heading", status: "pass", detail: `"${$("h1").first().text().trim().slice(0, 80)}"` }
-      : h1Count === 0
+    h1s.length === 1
+      ? { id: "h1", label: "Main heading", status: "pass", detail: h1Text ? `"${h1Text}"` : "The page has one <h1> heading." }
+      : h1s.length === 0
         ? { id: "h1", label: "Main heading", status: "warn", detail: "The page has no <h1> heading." }
-        : { id: "h1", label: "Main heading", status: "warn", detail: `The page has ${h1Count} <h1> headings. One main heading is clearer.` },
+        : { id: "h1", label: "Main heading", status: "warn", detail: `The page has ${h1s.length} <h1> headings. One main heading is clearer.` },
   );
 
-  const images = $("img");
-  const missingAlt = images.filter((_, el) => $(el).attr("alt") === undefined).length;
+  // Decorative images (hidden from assistive tech) don't need alt text.
+  const images = $("img").filter((_, el) => {
+    const img = $(el);
+    const role = img.attr("role")?.toLowerCase();
+    return img.attr("aria-hidden") !== "true" && role !== "presentation" && role !== "none";
+  });
+  const missingAlt = images.filter((_, el) => {
+    const img = $(el);
+    return (
+      img.attr("alt") === undefined &&
+      !img.attr("aria-label")?.trim() &&
+      !img.attr("aria-labelledby")?.trim() &&
+      !img.attr("title")?.trim()
+    );
+  }).length;
   checks.push(
     images.length === 0
-      ? { id: "alt", label: "Image descriptions", status: "pass", detail: "No images found on the page." }
+      ? { id: "alt", label: "Image descriptions", status: "pass", detail: "No content images found on the page." }
       : missingAlt === 0
         ? { id: "alt", label: "Image descriptions", status: "pass", detail: `All ${plural(images.length, "image")} have alt text.` }
-        : { id: "alt", label: "Image descriptions", status: missingAlt / images.length > 0.25 ? "fail" : "warn", detail: `${missingAlt} of ${plural(images.length, "image")} have no alt attribute.` },
+        : { id: "alt", label: "Image descriptions", status: missingAlt / images.length > 0.25 ? "fail" : "warn", detail: `${missingAlt} of ${plural(images.length, "image")} ${missingAlt === 1 ? "has" : "have"} no alt attribute.` },
   );
 
+  const labelFor = new Set(
+    $("label[for]")
+      .map((_, l) => $(l).attr("for"))
+      .get(),
+  );
   const unlabeled = $("input, select, textarea")
     .filter((_, el) => {
       const node = $(el);
       const type = (node.attr("type") ?? "").toLowerCase();
       if (["hidden", "submit", "button", "reset", "image"].includes(type)) return false;
+      if (node.attr("hidden") !== undefined || node.attr("aria-hidden") === "true") return false;
       const id = node.attr("id");
-      const hasLabelFor = id ? $("label").filter((_, l) => $(l).attr("for") === id).length > 0 : false;
       return !(
-        hasLabelFor ||
+        (id && labelFor.has(id)) ||
         node.closest("label").length > 0 ||
         node.attr("aria-label")?.trim() ||
         node.attr("aria-labelledby")?.trim() ||
@@ -317,15 +400,29 @@ export function analyzePage(input: {
       : { id: "labels", label: "Form field labels", status: "warn", detail: `${plural(unlabeled, "form field")} ${unlabeled === 1 ? "has" : "have"} no label, so screen reader users won't know what to type.` },
   );
 
-  const hasIcon = $('link[rel~="icon" i], link[rel="shortcut icon" i], link[rel="apple-touch-icon" i]').length > 0;
+  const declaresIcon =
+    $("link[rel]").filter((_, el) => /(^|\s)(icon|apple-touch-icon)(\s|$)/i.test($(el).attr("rel") ?? "")).length > 0;
   checks.push(
-    hasIcon
+    declaresIcon
       ? { id: "favicon", label: "Favicon", status: "pass", detail: "A site icon is declared." }
-      : { id: "favicon", label: "Favicon", status: "warn", detail: "No icon is declared in the page. Browsers will fall back to /favicon.ico if it exists." },
+      : { id: "favicon", label: "Favicon", status: "warn", detail: "No site icon is declared and none was found at /favicon.ico." },
   );
 
   if (isHttps) {
-    const insecure = $('img[src^="http:" i], script[src^="http:" i], iframe[src^="http:" i], link[rel~="stylesheet" i][href^="http:" i], video[src^="http:" i], audio[src^="http:" i], source[src^="http:" i]').length;
+    // Only absolute http:// URLs are insecure; relative URLs inherit https.
+    const insecureAttr = (value: string | undefined) => value?.trim().toLowerCase().startsWith("http:") ?? false;
+    const insecureSrcset = (value: string | undefined) =>
+      value?.split(",").some((candidate) => insecureAttr(candidate.trim().split(/\s+/)[0])) ?? false;
+    let insecure = 0;
+    $("img, script, iframe, video, audio, source, embed, track, link[rel], object").each((_, el) => {
+      const node = $(el);
+      const tag = (el as { tagName?: string }).tagName?.toLowerCase();
+      if (tag === "link") {
+        if (/(^|\s)(stylesheet|icon|preload|modulepreload)(\s|$)/i.test(node.attr("rel") ?? "") && insecureAttr(node.attr("href"))) insecure++;
+        return;
+      }
+      if (insecureAttr(node.attr("src")) || insecureAttr(node.attr("data")) || insecureSrcset(node.attr("srcset"))) insecure++;
+    });
     checks.push(
       insecure === 0
         ? { id: "mixed", label: "Mixed content", status: "pass", detail: "No resources are loaded over insecure HTTP." }
@@ -333,130 +430,215 @@ export function analyzePage(input: {
     );
   }
 
-  const securityHeaders = [
-    ...(isHttps ? [["strict-transport-security", "Strict-Transport-Security"]] : []),
-    ["content-security-policy", "Content-Security-Policy"],
-    ["x-content-type-options", "X-Content-Type-Options"],
+  const hasMetaCsp = $('meta[http-equiv="content-security-policy" i]').length > 0;
+  const securityHeaders: { present: boolean; name: string }[] = [
+    ...(isHttps ? [{ present: headers.has("strict-transport-security"), name: "Strict-Transport-Security" }] : []),
+    { present: headers.has("content-security-policy") || hasMetaCsp, name: "Content-Security-Policy" },
+    { present: headers.has("x-content-type-options"), name: "X-Content-Type-Options" },
   ];
-  const missingHeaders = securityHeaders.filter(([h]) => !headers.has(h)).map(([, name]) => name);
+  const missingHeaders = securityHeaders.filter((h) => !h.present).map((h) => h.name);
   checks.push(
     missingHeaders.length === 0
       ? { id: "headers", label: "Security headers", status: "pass", detail: "Key security headers are present." }
       : { id: "headers", label: "Security headers", status: "warn", detail: `Missing: ${missingHeaders.join(", ")}.` },
   );
 
-  const seen = new Set<string>();
+  const pageWithoutHash = new URL(finalUrl);
+  pageWithoutHash.hash = "";
+  const seen = new Set<string>([pageWithoutHash.href]);
   const links: URL[] = [];
-  $("a[href]").each((_, el) => {
+  $("a[href], area[href]").each((_, el) => {
     const href = $(el).attr("href")?.trim();
     if (!href || href.startsWith("#")) return;
     let link: URL;
     try {
-      link = new URL(href, finalUrl);
+      link = new URL(href, baseUrl);
     } catch {
       return;
     }
     if (link.protocol !== "http:" && link.protocol !== "https:") return;
     link.hash = "";
-    if (link.href === finalUrl.href || seen.has(link.href)) return;
+    if (seen.has(link.href)) return;
     seen.add(link.href);
     links.push(link);
   });
-  // Prefer the site's own pages, since those are the ones the owner can fix.
+  // Prefer the site's own pages, since those are the ones the owner can fix. sort() is stable, so page order is kept.
   links.sort((a, b) => Number(b.host === finalUrl.host) - Number(a.host === finalUrl.host));
 
-  return { checks, links };
+  return { checks, links, declaresIcon };
 }
 
-async function checkLink(link: URL): Promise<number | "error"> {
+export type LinkOutcome =
+  | { kind: "ok"; status: number }
+  | { kind: "broken"; status: number }
+  | { kind: "blocked"; status: number }
+  | { kind: "unreachable"; reason: string };
+
+/** Classifies an HTTP status the way a visitor would experience the link. */
+export function classifyLinkStatus(status: number): LinkOutcome["kind"] {
+  if (status >= 200 && status < 400) return "ok";
+  if (BOT_BLOCK_STATUSES.has(status)) return "blocked";
+  return "broken";
+}
+
+async function checkLink(link: URL): Promise<LinkOutcome> {
   try {
-    let { response } = await safeFetch(link, "HEAD", LINK_TIMEOUT_MS);
-    // Many servers reject HEAD; retry those with GET before calling the link broken.
-    if (response.status === 405 || response.status === 403 || response.status === 501) {
-      ({ response } = await safeFetch(link, "GET", LINK_TIMEOUT_MS));
+    let status: number;
+    try {
+      const { response } = await safeFetch(link, "HEAD", LINK_TIMEOUT_MS);
       await response.body?.cancel();
+      status = response.status;
+    } catch (error) {
+      if (error instanceof SiteCheckError) throw error;
+      status = 0; // Some servers drop HEAD requests entirely; retry with GET below.
     }
-    return response.status;
-  } catch {
-    return "error";
+    // Many servers answer HEAD incorrectly (400/403/404/405/501...). Only trust an error after a real GET.
+    if (status === 0 || status >= 400) {
+      const { response } = await safeFetch(link, "GET", LINK_TIMEOUT_MS);
+      await response.body?.cancel();
+      status = response.status;
+    }
+    const kind = classifyLinkStatus(status);
+    return kind === "ok" ? { kind, status } : kind === "blocked" ? { kind, status } : { kind: "broken", status };
+  } catch (error) {
+    return {
+      kind: "unreachable",
+      reason: error instanceof SiteCheckError ? error.message : isTimeout(error) ? "timed out" : (errorCode(error) ?? "connection failed"),
+    };
   }
 }
 
-async function checkLinks(links: URL[]): Promise<CheckResult> {
+export async function checkLinks(links: URL[], pageHost: string): Promise<CheckResult> {
   const sample = links.slice(0, MAX_LINKS_TO_CHECK);
   if (sample.length === 0) {
     return { id: "links", label: "Links", status: "pass", detail: "No links to other pages were found." };
   }
 
-  const broken: string[] = [];
+  const results: { link: URL; outcome: LinkOutcome }[] = [];
   let index = 0;
   async function worker() {
     while (index < sample.length) {
       const link = sample[index++];
-      const status = await checkLink(link);
-      // 401/403/429 usually mean "blocked bots" rather than a dead page.
-      if (status === "error" || (status >= 400 && ![401, 403, 429].includes(status))) {
-        broken.push(`${link.href} (${status === "error" ? "unreachable" : status})`);
-      }
+      results.push({ link, outcome: await checkLink(link) });
     }
   }
   await Promise.all(Array.from({ length: Math.min(LINK_CONCURRENCY, sample.length) }, worker));
+
+  const broken = results.filter((r) => r.outcome.kind === "broken");
+  // A timeout or connection error on the site's own page is a real problem; on someone else's site it may be temporary.
+  const unreachableInternal = results.filter((r) => r.outcome.kind === "unreachable" && r.link.host === pageHost);
+  const unreachableExternal = results.filter((r) => r.outcome.kind === "unreachable" && r.link.host !== pageHost);
+  const blocked = results.filter((r) => r.outcome.kind === "blocked");
+
+  const describe = (r: { link: URL; outcome: LinkOutcome }) =>
+    `${r.link.href} (${"status" in r.outcome ? r.outcome.status : r.outcome.reason})`;
+  const list = (items: typeof results) =>
+    items.slice(0, 5).map(describe).join(", ") + (items.length > 5 ? ", …" : "");
 
   const scope =
     links.length > sample.length
       ? `the first ${sample.length} of ${plural(links.length, "link")}`
       : plural(sample.length, "link");
-  if (broken.length === 0) {
-    return { id: "links", label: "Links", status: "pass", detail: `Checked ${scope}; all of them work.` };
+
+  const parts: string[] = [];
+  if (broken.length) parts.push(`${broken.length} broken: ${list(broken)}`);
+  if (unreachableInternal.length) parts.push(`${unreachableInternal.length} of the site's own pages could not be reached: ${list(unreachableInternal)}`);
+  if (unreachableExternal.length) parts.push(`${unreachableExternal.length} external ${unreachableExternal.length === 1 ? "link" : "links"} could not be reached right now: ${list(unreachableExternal)}`);
+  if (blocked.length) parts.push(`${blocked.length} ${blocked.length === 1 ? "site blocks" : "sites block"} automated checks, so ${blocked.length === 1 ? "it was" : "they were"} skipped`);
+
+  const status: CheckStatus =
+    broken.length || unreachableInternal.length ? "fail" : unreachableExternal.length ? "warn" : "pass";
+  if (parts.length === 0) {
+    return { id: "links", label: "Links", status, detail: `Checked ${scope}; all of them work.` };
   }
-  return {
-    id: "links",
-    label: "Links",
-    status: "fail",
-    detail: `Checked ${scope}; ${broken.length} broken: ${broken.slice(0, 5).join(", ")}${broken.length > 5 ? ", …" : ""}`,
-  };
+  return { id: "links", label: "Links", status, detail: `Checked ${scope}; ${parts.join("; ")}.` };
+}
+
+async function faviconExists(pageUrl: URL): Promise<boolean> {
+  try {
+    const { response } = await safeFetch(new URL("/favicon.ico", pageUrl), "GET", LINK_TIMEOUT_MS);
+    await response.body?.cancel();
+    const type = response.headers.get("content-type") ?? "";
+    // Some servers answer every path with an HTML page; that isn't an icon.
+    return response.ok && !/html/i.test(type);
+  } catch {
+    return false;
+  }
+}
+
+/** True when an https:// request failed because HTTPS itself is unavailable (no TLS listener or a bad certificate). */
+function httpsUnavailable(error: unknown): boolean {
+  const code = errorCode(error) ?? "";
+  return (
+    ["ECONNREFUSED", "ECONNRESET", "EPROTO"].includes(code) ||
+    code.includes("CERT") ||
+    code.includes("SSL") ||
+    code.includes("TLS")
+  );
+}
+
+class PageFetchError extends SiteCheckError {
+  constructor(
+    message: string,
+    readonly httpsUnavailable: boolean,
+  ) {
+    super(message);
+  }
+}
+
+async function fetchPage(url: URL): Promise<FetchOutcome> {
+  try {
+    return await safeFetch(url, "GET", PAGE_TIMEOUT_MS);
+  } catch (error) {
+    throw new PageFetchError(describeFetchError(error), !(error instanceof SiteCheckError) && httpsUnavailable(error));
+  }
 }
 
 export async function checkSite(rawUrl: string): Promise<SiteReport> {
   const requested = normalizeUrl(rawUrl);
+  const schemeGiven = /^[a-z][a-z\d+.-]*:\/\//i.test(rawUrl.trim());
 
-  const started = performance.now();
   let outcome: FetchOutcome;
   try {
-    outcome = await safeFetch(requested, "GET", PAGE_TIMEOUT_MS);
+    outcome = await fetchPage(requested);
   } catch (error) {
-    throw new SiteCheckError(describeFetchError(error));
+    // "example.com" was assumed to be HTTPS. If HTTPS isn't available at all, try plain HTTP like a browser would.
+    if (schemeGiven || !(error instanceof PageFetchError) || !error.httpsUnavailable) throw error;
+    const httpUrl = new URL(requested);
+    httpUrl.protocol = "http:";
+    try {
+      outcome = await fetchPage(httpUrl);
+    } catch {
+      throw error;
+    }
   }
   const { response, finalUrl } = outcome;
-  const responseTimeMs = Math.round(performance.now() - started);
+  const responseTimeMs = outcome.elapsedMs;
 
   if (!response.ok) {
     await response.body?.cancel();
-    throw new SiteCheckError(
-      `The website answered with HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}, so the page could not be checked.`,
-    );
+    throw new SiteCheckError(describeHttpError(response.status, response.statusText));
   }
 
   const contentType = response.headers.get("content-type") ?? "";
-  if (contentType && !/html|xml/i.test(contentType)) {
+  if (contentType && !/text\/html|application\/xhtml\+xml/i.test(contentType)) {
     await response.body?.cancel();
-    throw new SiteCheckError(`That address returns ${contentType.split(";")[0]}, not a web page.`);
+    throw new SiteCheckError(`That address returns ${contentType.split(";")[0].trim()}, not a web page.`);
   }
 
-  let html: string;
-  let htmlBytes: number;
+  let body: Buffer;
   try {
-    ({ text: html, bytes: htmlBytes } = await readLimitedText(response));
+    body = await readLimitedBody(response);
   } catch (error) {
     throw new SiteCheckError(describeFetchError(error));
   }
 
-  const { checks, links } = analyzePage({
-    html,
+  const { checks, links, declaresIcon } = analyzePage({
+    html: decodeHtml(body, contentType),
     finalUrl,
     headers: response.headers,
     responseTimeMs,
-    htmlBytes,
+    htmlBytes: body.byteLength,
   });
 
   checks.unshift({
@@ -468,7 +650,19 @@ export async function checkSite(rawUrl: string): Promise<SiteReport> {
         ? `Loaded ${finalUrl.href} after ${plural(outcome.redirects, "redirect")} (HTTP ${response.status}).`
         : `Loaded with HTTP ${response.status}.`,
   });
-  checks.push(await checkLinks(links));
+
+  const [linkCheck, hasFaviconFile] = await Promise.all([
+    checkLinks(links, finalUrl.host),
+    declaresIcon ? Promise.resolve(true) : faviconExists(finalUrl),
+  ]);
+  if (!declaresIcon && hasFaviconFile) {
+    const favicon = checks.find((c) => c.id === "favicon");
+    if (favicon) {
+      favicon.status = "pass";
+      favicon.detail = "A site icon was found at /favicon.ico.";
+    }
+  }
+  checks.push(linkCheck);
 
   const summary: Record<CheckStatus, number> = { pass: 0, warn: 0, fail: 0 };
   for (const check of checks) summary[check.status]++;

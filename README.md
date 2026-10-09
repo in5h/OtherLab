@@ -10,7 +10,7 @@ OtherLab is a friendly website checker. Enter a URL and it opens the page on the
 - **SEO basics**: title, meta description, a single main `<h1>`
 - **Accessibility basics**: `lang` attribute, image alt text, form field labels, mobile viewport
 - **Favicon**
-- **Links**: up to 20 links on the page (the site's own pages first) are requested to find broken ones
+- **Links**: up to 20 links on the page (the site's own pages first) are requested to find broken ones. A link counts as broken only when a real GET request returns an error, since many servers answer HEAD requests wrongly. Sites that block bots (401/403/429/999) are skipped rather than reported as broken, and unreachable external sites are a warning rather than a failure
 
 The checks run in `lib/siteCheck.ts` and are served from `POST /api/check` with a body of `{ "url": "https://example.com" }`.
 
@@ -25,7 +25,14 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-Other scripts: `npm run lint`, `npm run build`, `npm start`.
+Other scripts: `npm test`, `npm run lint`, `npm run build`, `npm start`.
+
+## Tests
+
+`npm test` runs the checker's test suite (vitest):
+
+- `lib/siteCheck.test.ts` covers every check with passing and failing HTML, plus URL validation and private-address blocking
+- `lib/siteCheck.integration.test.ts` runs full scans against a local server that imitates real-world quirks: redirects, servers that answer HEAD wrongly, bot-blocking status codes (403/429/999), non-UTF-8 pages, missing pages and redirect loops
 
 ## Learn More
 
