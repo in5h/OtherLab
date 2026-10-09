@@ -1,24 +1,31 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# OtherLab
 
-## Getting Started
+OtherLab is a friendly website checker. Enter a URL and it opens the page on the server, then reports what passed, what needs attention and what failed, in plain language.
 
-First, run the development server:
+## What it checks
+
+- **Page loads**: final HTTP status, following redirects
+- **Secure connection**: HTTPS, mixed content, and key security headers (HSTS, CSP, X-Content-Type-Options)
+- **Speed**: server response time and HTML size
+- **SEO basics**: title, meta description, a single main `<h1>`
+- **Accessibility basics**: `lang` attribute, image alt text, form field labels, mobile viewport
+- **Favicon**
+- **Links**: up to 20 links on the page (the site's own pages first) are requested to find broken ones
+
+The checks run in `lib/siteCheck.ts` and are served from `POST /api/check` with a body of `{ "url": "https://example.com" }`.
+
+For safety, the checker refuses localhost, private network and link-local addresses, including addresses reached through redirects. For local development against a site on your own machine, start the server with `OTHERLAB_ALLOW_PRIVATE_HOSTS=1`.
+
+## Getting started
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Other scripts: `npm run lint`, `npm run build`, `npm start`.
 
 ## Learn More
 

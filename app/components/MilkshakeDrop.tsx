@@ -77,9 +77,9 @@ export default function MilkshakeDrop({
         src="/milkshake.png"
         alt="Mango milkshake"
         width={104}
-        height={104}
+        height={156}
         onAnimationEnd={onAnimationEnd}
-      />{" "}
+      />
     </button>
   );
 }

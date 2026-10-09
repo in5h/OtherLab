@@ -34,7 +34,7 @@ export default function DollCompanion({
   onCloseBubble,
   onAcceptMilkshake,
 }: DollCompanionProps) {
-  const [position, setPosition] = useState({ left: 4, y: 18 });
+  const [scrollY, setScrollY] = useState(18);
   const [manualPosition, setManualPosition] = useState<{
     left: number;
     y: number;
@@ -50,12 +50,15 @@ export default function DollCompanion({
       const maxScroll =
         document.documentElement.scrollHeight - window.innerHeight;
       const progress = maxScroll > 0 ? window.scrollY / maxScroll : 0;
-      const left = Math.sin(progress * Math.PI * 3) >= 0 ? 86 : 4;
-      setPosition({ left, y: 18 + progress * 62 });
+      setScrollY(18 + progress * 62);
     }
     update();
     window.addEventListener("scroll", update, { passive: true });
-    return () => window.removeEventListener("scroll", update);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
   }, []);
 
   /* --- drag handlers --- */
@@ -102,7 +105,7 @@ export default function DollCompanion({
   };
 
   const displayedLeft = manualPosition?.left ?? 4;
-  const displayedY = manualPosition?.y ?? position.y;
+  const displayedY = manualPosition?.y ?? scrollY;
 
   return (
     <div
@@ -129,7 +132,8 @@ export default function DollCompanion({
           alt=""
           className="doll-image"
           width={112}
-          height={112}
+          height={140}
+          priority
         />
       </button>
 
@@ -137,7 +141,7 @@ export default function DollCompanion({
         <div
           className={`doll-bubble ${displayedLeft < 50 ? "doll-bubble-right" : "doll-bubble-left"} ${followButton ? "doll-bubble-follow" : ""}`}
           role="dialog"
-          aria-label="Milkshake offer"
+          aria-label="Message from the doll"
         >
           {messageStep === 0 && (
             <button

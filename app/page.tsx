@@ -7,10 +7,10 @@ import DollCompanion from "./components/DollCompanion";
 import MilkshakeDrop from "./components/MilkshakeDrop";
 import WelcomeScreen from "./components/WelcomeScreen";
 import Typewriter from "./components/Typewriter";
+import SiteChecker from "./components/SiteChecker";
 
 export default function Home() {
   const router = useRouter();
-  const [url, setUrl] = useState("");
   const [milkshakeVisible, setMilkshakeVisible] = useState(false);
   const [welcomeVisible, setWelcomeVisible] = useState(false);
 
@@ -34,17 +34,22 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [dollMessageStep]);
 
-  function scrollToReview() {
+  // Show the welcome overlay briefly, then go to the contact page
+  useEffect(() => {
+    if (!welcomeVisible) return;
+    router.prefetch("/contact");
+    const timer = setTimeout(() => router.push("/contact"), 2000);
+    return () => clearTimeout(timer);
+  }, [welcomeVisible, router]);
+
+  function goToContact() {
+    if (welcomeVisible) return;
     setMilkshakeVisible(false);
     setWelcomeVisible(true);
     setDollBubbleOpen(false);
     setDollMessageStep(0);
     setDollFollowButton(false);
     setDollResetKey((k) => k + 1);
-    setTimeout(() => {
-      setWelcomeVisible(false);
-      router.push("/contact");
-    }, 2000);
   }
 
   function openDollBubble() {
@@ -60,6 +65,13 @@ export default function Home() {
     setDollMessageStep(1);
     setDollBubbleOpen(true);
     setMilkshakeVisible(true);
+  }
+
+  function missMilkshake() {
+    // The milkshake fell without being caught: reset the doll so it can offer again
+    setMilkshakeVisible(false);
+    setDollMessageStep(0);
+    setDollBubbleOpen(false);
   }
 
   function catchMilkshake() {
@@ -87,7 +99,7 @@ export default function Home() {
       {milkshakeVisible && (
         <MilkshakeDrop
           onCatch={catchMilkshake}
-          onAnimationEnd={() => setMilkshakeVisible(false)}
+          onAnimationEnd={missMilkshake}
         />
       )}
 
@@ -95,10 +107,10 @@ export default function Home() {
       <button
         type="button"
         className="floating-cta-button"
-        aria-label="Jump to the personal QA review section"
-        onClick={scrollToReview}
+        aria-label="Get in touch about a personal QA review"
+        onClick={goToContact}
       >
-        <Image src="/button.png" alt="" width={72} height={72} />
+        <Image src="/button.png" alt="" width={72} height={90} />
       </button>
 
       {/* Welcome overlay */}
@@ -118,7 +130,7 @@ export default function Home() {
             OtherLab by Insharah
           </div>
 
-          <h1 className="text-5xl font-bold tracking-tight sm:text-7xl" aria-label="Does your website actually work?">
+          <h1 className="text-3xl font-bold tracking-tight sm:text-5xl lg:text-7xl" aria-label="Does your website actually work?">
             <span className="typewriter-line">
               <Typewriter text="Does your website" id="h1" />
             </span>
@@ -132,19 +144,7 @@ export default function Home() {
             explains anything that may need fixing in plain language.
           </p>
 
-          {/* URL input */}
-          <div className="mt-10 flex w-full flex-col gap-3 sm:flex-row">
-            <input
-              type="text"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://yourwebsite.com"
-              className="h-14 flex-1 rounded-xl border border-gray-300 px-5 text-base outline-none transition focus:border-black"
-            />
-            <button className="h-14 rounded-xl border border-[#d8b84c] bg-[#171717] px-7 font-medium text-[#d9d0b8] shadow-[5px_5px_0_#665a86] transition hover:-translate-y-0.5 hover:bg-[#3d315b] hover:shadow-[3px_3px_0_#d8b84c]">
-              Check my website
-            </button>
-          </div>
+          <SiteChecker />
         </div>
 
         {/* Empty state */}
@@ -162,7 +162,7 @@ export default function Home() {
             <div className="rounded-xl border border-gray-200 p-4">
               <p className="font-medium">2. OtherLab scans</p>
               <p className="mt-1 text-sm text-gray-500">
-                It opens the website and checks multiple pages.
+                It opens the page and checks speed, SEO, accessibility, security and links.
               </p>
             </div>
             <div className="rounded-xl border border-gray-200 p-4">

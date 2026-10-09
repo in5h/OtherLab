@@ -47,7 +47,7 @@ export default function ContactPage() {
                 src="/button.png"
                 alt="OtherLab button"
                 width={92}
-                height={92}
+                height={115}
                 className="shrink-0"
               />
             </div>

@@ -60,13 +60,21 @@ textarea,
   isolation: isolate;
   overflow: hidden;
   background-color: var(--background);
+}
+
+/* Fixed layer instead of background-attachment: fixed, which iOS ignores and which stops covering long pages */
+.coraline-page::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
   background-image:
     linear-gradient(rgba(8, 12, 27, 0.48), rgba(8, 12, 27, 0.62)),
     url("/coraline-background.jpg");
   background-position: center top;
   background-repeat: no-repeat;
   background-size: cover;
-  background-attachment: fixed;
+  pointer-events: none;
 }
 
 .coraline-stars {
@@ -296,6 +304,23 @@ textarea,
   pointer-events: none;
 }
 
+.welcome-content {
+  display: grid;
+  gap: 1rem;
+  justify-items: center;
+  padding: 0 1.5rem;
+}
+
+.welcome-content span {
+  max-width: 32rem;
+  color: var(--paper);
+  font-family: "IM FELL English", Georgia, serif;
+  font-size: clamp(1rem, 2.5vw, 1.35rem);
+  text-align: center;
+  opacity: 0;
+  animation: doll-arrives 600ms 900ms ease-out forwards;
+}
+
 .welcome-screen p {
   margin: 0;
   color: var(--yellow);
@@ -377,9 +402,25 @@ textarea,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .header-character {
+  .header-character,
+  .doll-message-character,
+  .welcome-content span {
     animation: none;
     opacity: 1;
+  }
+
+  .welcome-screen p,
+  .floating-cta-button {
+    animation: none;
+  }
+
+  .milkshake-drop img {
+    animation-duration: 16s;
+  }
+
+  .doll-companion,
+  .doll-bubble {
+    transition: none;
   }
 }
 
@@ -446,4 +487,41 @@ textarea,
 
 .coraline-link:hover {
   color: #171717;
+}
+
+.check-pass { --check-color: #8fbf7a; }
+.check-warn { --check-color: var(--yellow); }
+.check-fail { --check-color: #e07a6c; }
+
+.check-summary {
+  border: 1px solid var(--check-color);
+  background: rgba(15, 24, 45, 0.88);
+  box-shadow: 5px 5px 0 rgba(0, 0, 0, 0.26);
+}
+
+.check-summary p:first-child {
+  color: var(--check-color);
+}
+
+.check-badge {
+  flex-shrink: 0;
+  min-width: 7.5rem;
+  margin-top: 0.1rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--check-color);
+  border-radius: 999px;
+  color: var(--check-color);
+  font-family: "Special Elite", Georgia, serif;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.check-error {
+  border: 1px solid #e07a6c;
+  background: rgba(61, 20, 24, 0.85);
+  color: #f3c6bd;
+}
+
+.coraline-page input::placeholder {
+  color: rgba(217, 208, 184, 0.55);
 }
